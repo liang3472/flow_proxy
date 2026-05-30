@@ -1,6 +1,6 @@
 """浏览器行为常量（不可通过 .env 配置）。"""
 
-BROWSER_CHANNEL = "chromium"
+BROWSER_CHANNEL = "chrome"
 GOTO_WAIT_UNTIL = "domcontentloaded"
 
 SESSION_COOKIE_NAME = "__Secure-next-auth.session-token"
