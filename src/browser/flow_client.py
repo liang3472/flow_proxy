@@ -16,7 +16,7 @@ from src.browser.captcha import solve_recaptcha_on_page
 from src.browser.cookies import clear_labs_google_session, inject_session_cookie
 from src.browser.resource_blocker import attach_resource_blocker, chromium_speed_args
 from src.browser.session import read_access_token_from_page
-from src.browser.constants import BROWSER_CHANNEL, GOTO_WAIT_UNTIL
+from src.browser.constants import BROWSER_CHANNEL, GOTO_WAIT_UNTIL, PROJECT_GOTO_WAIT_UNTIL
 from src.config import settings
 from src.log_util import format_token_for_log
 from src.models import ImageGenerateRequest
@@ -235,7 +235,7 @@ class FlowBrowserClient:
                 await inject_session_cookie(self._context, cookie_value)
                 await page.goto(
                     project_url,
-                    wait_until=GOTO_WAIT_UNTIL,
+                    wait_until=PROJECT_GOTO_WAIT_UNTIL,
                     timeout=settings.page_timeout_ms,
                 )
 

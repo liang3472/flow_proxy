@@ -2,6 +2,8 @@
 
 BROWSER_CHANNEL = "chrome"
 GOTO_WAIT_UNTIL = "domcontentloaded"
+PROJECT_GOTO_WAIT_UNTIL = "load"
+PROJECT_NETWORK_IDLE_TIMEOUT_MS = 15_000
 
 SESSION_COOKIE_NAME = "__Secure-next-auth.session-token"
 SESSION_COOKIE_URL = "https://labs.google"
