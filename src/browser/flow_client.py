@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import random
 import time
@@ -165,82 +166,86 @@ def _build_video_status_request_body(req: VideoStatusCheckRequest) -> dict[str, 
     }
 
 
-async def _get_media_url_redirect_in_page(
-    page: Page,
+def _find_http_url_in_payload(payload: Any) -> str | None:
+    if isinstance(payload, str) and payload.startswith(("http://", "https://")):
+        return payload
+    if isinstance(payload, dict):
+        for value in payload.values():
+            found = _find_http_url_in_payload(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_http_url_in_payload(item)
+            if found:
+                return found
+    return None
+
+
+async def _parse_api_response_body(response: Any) -> Any:
+    try:
+        return await response.json()
+    except Exception:
+        text = await response.text()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return text
+
+
+async def _get_media_url_redirect_via_context(
+    context: BrowserContext,
     *,
     url: str,
     follow_redirect: bool,
 ) -> dict[str, Any]:
-    return await page.evaluate(
-        """
-        async ({ url, followRedirect }) => {
-          const findHttpUrl = (payload) => {
-            const stack = [payload];
-            while (stack.length) {
-              const cur = stack.pop();
-              if (typeof cur === 'string' && /^https?:\\/\\//i.test(cur)) {
-                return cur;
-              }
-              if (cur && typeof cur === 'object') {
-                for (const v of Object.values(cur)) stack.push(v);
-              }
-            }
-            return null;
-          };
+    """用 BrowserContext.request 请求 tRPC（与页面共享 Cookie，避开页面 fetch 限制）。"""
+    headers = {
+        "Referer": f"{settings.flow_labs_origin}/",
+        "Accept": "*/*",
+    }
+    max_redirects = 10 if follow_redirect else 0
 
-          const res = await fetch(url, {
-            method: 'GET',
-            credentials: 'include',
-            redirect: followRedirect ? 'follow' : 'manual',
-          });
-
-          if (!followRedirect && res.status >= 300 && res.status < 400) {
-            const location = res.headers.get('location');
-            return {
-              status: res.status,
-              ok: Boolean(location),
-              data: {
-                url: location,
-                redirect: true,
-              },
-            };
-          }
-
-          const contentType = res.headers.get('content-type') || '';
-          let raw = null;
-          if (contentType.includes('application/json')) {
-            try {
-              raw = await res.json();
-            } catch {
-              raw = null;
-            }
-          } else {
-            const text = await res.text();
-            if (text) {
-              try {
-                raw = JSON.parse(text);
-              } catch {
-                raw = text;
-              }
-            }
-          }
-
-          const parsedUrl = raw ? findHttpUrl(raw) : null;
-          const finalUrl = parsedUrl || (res.url !== url ? res.url : null);
-
-          return {
-            status: res.status,
-            ok: res.ok && Boolean(finalUrl),
-            data: {
-              url: finalUrl,
-              redirect: Boolean(finalUrl && finalUrl !== url),
-              raw,
-            },
-          };
+    try:
+        response = await context.request.get(
+            url,
+            headers=headers,
+            max_redirects=max_redirects,
+        )
+    except Exception as exc:
+        logger.exception("media.getMediaUrlRedirect request failed")
+        return {
+            "status": 0,
+            "ok": False,
+            "data": {"error": str(exc)},
         }
-        """,
-        {"url": url, "followRedirect": follow_redirect},
-    )
+
+    status = response.status
+
+    if not follow_redirect and 300 <= status < 400:
+        location = response.headers.get("location")
+        return {
+            "status": status,
+            "ok": bool(location),
+            "data": {"url": location, "redirect": True},
+        }
+
+    raw = await _parse_api_response_body(response)
+    parsed_url = _find_http_url_in_payload(raw)
+    response_url = str(response.url)
+    final_url = parsed_url or (response_url if response_url != url else None)
+
+    return {
+        "status": status,
+        "ok": response.ok and bool(final_url),
+        "data": {
+            "url": final_url,
+            "redirect": bool(final_url and final_url != url),
+            "raw": raw,
+        },
+    }
 
 
 async def _post_flow_api_in_page(
@@ -518,11 +523,12 @@ class FlowBrowserClient:
         cookie_value = req.next_auth_session_token or req.session_token
         async with self._flow_project_session(
             req.project_id, cookie_value, log_label="media url"
-        ) as (page, _access_token, _browser_headers):
+        ) as (_page, _access_token, _browser_headers):
+            assert self._context is not None
             api_url = _media_url_redirect_url(req.name)
             logger.info("Fetching media URL redirect for name=%s", req.name)
-            return await _get_media_url_redirect_in_page(
-                page,
+            return await _get_media_url_redirect_via_context(
+                self._context,
                 url=api_url,
                 follow_redirect=req.follow_redirect,
             )
