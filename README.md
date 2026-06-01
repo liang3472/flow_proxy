@@ -119,7 +119,23 @@ python -m src.main
 | `session_token` | NextAuth Cookie 值 |
 | `media` | 待查列表；每项 `name` 必填，`project_id` 可选 |
 
-可同时查询多个 `media`。响应格式与生成接口相同，根据 `data` 内状态字段判断是否完成。
+可同时查询多个 `media`。响应格式与生成接口相同，根据 `data.media[].mediaMetadata.mediaStatus.mediaGenerationStatus` 判断是否完成（如 `MEDIA_GENERATION_STATUS_SUCCESSFUL`）。
+
+**注意：** 状态接口一般**不包含**带签名的 MP4 下载链接；完成后需再调 `POST /api/v1/media/get` 取 `fifeUrl`（形如 `https://flow-content.google/video/{uuid}?Expires=...`）。
+
+### `POST /api/v1/media/get`
+
+对应 Google `GET /v1/media/{mediaId}`，无需打码。`media_id` 与 status 响应里的 `media.name` 相同。
+
+```json
+{
+  "project_id": "your-project-uuid",
+  "session_token": "ya29.xxx",
+  "media_id": "dff3b58e-8d20-4c75-a82b-f6cdb16116f7"
+}
+```
+
+成功时在 `data` 中查找 `fifeUrl`（或 `video.generatedVideo.fifeUrl` 等嵌套字段）即为可下载地址，链接有过期时间（`Expires` 参数）。
 
 ### `GET /health`
 

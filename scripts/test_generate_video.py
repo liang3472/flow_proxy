@@ -37,6 +37,7 @@ _DONE_STATUSES = frozenset(
         "MEDIA_GENERATION_STATUS_COMPLETE",
         "MEDIA_GENERATION_STATUS_COMPLETED",
         "MEDIA_GENERATION_STATUS_SUCCEEDED",
+        "MEDIA_GENERATION_STATUS_SUCCESSFUL",
         "MEDIA_GENERATION_STATUS_SUCCESS",
         "MEDIA_GENERATION_STATUS_READY",
     }
@@ -134,6 +135,46 @@ def _media_generation_status(item: dict) -> str | None:
     return str(value) if value else None
 
 
+def _extract_fife_url(data: Any) -> str | None:
+    """从 GET /v1/media 或嵌套响应中提取 fifeUrl / imageUri。"""
+    if not isinstance(data, dict):
+        return None
+
+    def _from_obj(obj: dict) -> str | None:
+        for key in ("fifeUrl", "imageUri", "videoUri", "signedUri"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.startswith("http"):
+                return val
+        video = obj.get("video")
+        if isinstance(video, dict):
+            gen = video.get("generatedVideo")
+            if isinstance(gen, dict):
+                for key in ("fifeUrl", "videoUri", "signedUri"):
+                    val = gen.get(key)
+                    if isinstance(val, str) and val.startswith("http"):
+                        return val
+        image = obj.get("image")
+        if isinstance(image, dict):
+            gen = image.get("generatedImage")
+            if isinstance(gen, dict):
+                for key in ("fifeUrl", "imageUri"):
+                    val = gen.get(key)
+                    if isinstance(val, str) and val.startswith("http"):
+                        return val
+        return None
+
+    found = _from_obj(data)
+    if found:
+        return found
+    for key in ("media", "image", "video"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            found = _from_obj(nested)
+            if found:
+                return found
+    return None
+
+
 def _summarize_media_status(data: Any) -> list[tuple[str, str | None]]:
     if not isinstance(data, dict):
         return []
@@ -151,14 +192,38 @@ def _all_media_terminal(data: Any) -> bool:
     summary = _summarize_media_status(data)
     if not summary:
         return False
-    return all(
-        s in _DONE_STATUSES or s in _FAILED_STATUSES for _, s in summary if s
-    )
+    for _, status in summary:
+        if not status:
+            return False
+        if status not in _DONE_STATUSES and status not in _FAILED_STATUSES:
+            return False
+    return True
 
 
 def _any_media_failed(data: Any) -> bool:
     return any(
         s in _FAILED_STATUSES for _, s in _summarize_media_status(data) if s
+    )
+
+
+def _call_media_get(
+    base: str,
+    *,
+    project_id: str,
+    session_token: str,
+    media_id: str,
+    timeout: float,
+) -> tuple[int, dict | str]:
+    payload = {
+        "project_id": project_id,
+        "session_token": session_token,
+        "media_id": media_id,
+    }
+    return _request(
+        "POST",
+        f"{base}/api/v1/media/get",
+        body=payload,
+        timeout=timeout,
     )
 
 
@@ -183,6 +248,35 @@ def _call_status(
     )
 
 
+def _fetch_and_print_download_urls(
+    base: str,
+    *,
+    project_id: str,
+    session_token: str,
+    media_names: list[str],
+    request_timeout: float,
+) -> None:
+    for media_id in media_names:
+        print(f"\n--- 获取下载地址: {media_id} ---")
+        status, body = _call_media_get(
+            base,
+            project_id=project_id,
+            session_token=session_token,
+            media_id=media_id,
+            timeout=request_timeout,
+        )
+        print(f"HTTP {status}")
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        if isinstance(body, dict) and body.get("ok"):
+            url = _extract_fife_url(body.get("data"))
+            if url:
+                print(f"\n下载地址:\n{url}")
+            else:
+                print("\n未在响应中找到 fifeUrl，请检查 data 结构", file=sys.stderr)
+        else:
+            print("\n✗ 获取 media 失败", file=sys.stderr)
+
+
 def _poll_until_done(
     base: str,
     *,
@@ -192,6 +286,7 @@ def _poll_until_done(
     request_timeout: float,
     poll_interval: float,
     poll_timeout: float,
+    fetch_url: bool,
 ) -> int:
     deadline = time.monotonic() + poll_timeout
     attempt = 0
@@ -225,6 +320,14 @@ def _poll_until_done(
                 print("\n✗ 视频生成失败", file=sys.stderr)
                 return 1
             print("\n✓ 视频生成完成")
+            if fetch_url:
+                _fetch_and_print_download_urls(
+                    base,
+                    project_id=project_id,
+                    session_token=session_token,
+                    media_names=media_names,
+                    request_timeout=request_timeout,
+                )
             return 0
 
         remaining = deadline - time.monotonic()
@@ -260,6 +363,16 @@ def main() -> int:
         "--poll",
         action="store_true",
         help="generate 成功后自动轮询 /api/v1/videos/status 直到完成",
+    )
+    parser.add_argument(
+        "--fetch-url",
+        action="store_true",
+        help="轮询完成后调用 POST /api/v1/media/get 获取 fifeUrl 下载地址",
+    )
+    parser.add_argument(
+        "--get-media-only",
+        action="store_true",
+        help="只调用 POST /api/v1/media/get（需 --media-name）",
     )
     parser.add_argument(
         "--media-name",
@@ -339,6 +452,19 @@ def main() -> int:
         parser.print_help()
         return 2
 
+    if args.get_media_only:
+        if not media_names:
+            print("缺少 --media-name 或 FLOW_VIDEO_MEDIA_NAME", file=sys.stderr)
+            return 2
+        _fetch_and_print_download_urls(
+            base,
+            project_id=args.project_id,
+            session_token=args.session_token,
+            media_names=media_names,
+            request_timeout=args.timeout,
+        )
+        return 0
+
     if args.status_only:
         if not media_names:
             print("缺少 --media-name 或 FLOW_VIDEO_MEDIA_NAME", file=sys.stderr)
@@ -362,6 +488,7 @@ def main() -> int:
                 request_timeout=args.timeout,
                 poll_interval=args.poll_interval,
                 poll_timeout=args.poll_timeout,
+                fetch_url=args.fetch_url,
             )
 
         status, body = _call_status(
@@ -431,6 +558,7 @@ def main() -> int:
         request_timeout=args.timeout,
         poll_interval=args.poll_interval,
         poll_timeout=args.poll_timeout,
+        fetch_url=args.fetch_url,
     )
 
 

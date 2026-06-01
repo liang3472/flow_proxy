@@ -23,6 +23,7 @@ from src.config import settings
 from src.log_util import format_token_for_log
 from src.models import (
     ImageGenerateRequest,
+    MediaGetRequest,
     VideoGenerateRequest,
     VideoStatusCheckRequest,
 )
@@ -156,26 +157,30 @@ def _build_video_status_request_body(req: VideoStatusCheckRequest) -> dict[str, 
     }
 
 
-async def _post_flow_api_in_page(
+async def _call_flow_api_in_page(
     page: Page,
     *,
+    method: str,
     url: str,
     access_token: str,
-    body: dict[str, Any],
     browser_headers: dict[str, str],
+    body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return await page.evaluate(
         """
-        async ({ url, token, body, browserHeaders }) => {
+        async ({ method, url, token, body, browserHeaders }) => {
+          const headers = {
+            authorization: `Bearer ${token}`,
+            Referer: 'https://labs.google/',
+            ...browserHeaders,
+          };
+          if (body != null) {
+            headers['content-type'] = 'text/plain;charset=UTF-8';
+          }
           const res = await fetch(url, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${token}`,
-              'content-type': 'text/plain;charset=UTF-8',
-              Referer: 'https://labs.google/',
-              ...browserHeaders,
-            },
-            body: JSON.stringify(body),
+            method,
+            headers,
+            body: body != null ? JSON.stringify(body) : undefined,
           });
           const text = await res.text();
           let data;
@@ -188,11 +193,30 @@ async def _post_flow_api_in_page(
         }
         """,
         {
+            "method": method,
             "url": url,
             "token": access_token,
             "body": body,
             "browserHeaders": browser_headers,
         },
+    )
+
+
+async def _post_flow_api_in_page(
+    page: Page,
+    *,
+    url: str,
+    access_token: str,
+    body: dict[str, Any],
+    browser_headers: dict[str, str],
+) -> dict[str, Any]:
+    return await _call_flow_api_in_page(
+        page,
+        method="POST",
+        url=url,
+        access_token=access_token,
+        browser_headers=browser_headers,
+        body=body,
     )
 
 
@@ -424,6 +448,23 @@ class FlowBrowserClient:
                 url=api_url,
                 access_token=access_token,
                 body=body,
+                browser_headers=browser_headers,
+            )
+
+    async def get_media(self, req: MediaGetRequest) -> dict[str, Any]:
+        cookie_value = req.next_auth_session_token or req.session_token
+        async with self._flow_project_session(
+            req.project_id, cookie_value, log_label="media"
+        ) as (page, access_token, browser_headers):
+            api_url = (
+                f"{settings.flow_api_base}"
+                f"{settings.flow_media_api_path_template.format(media_id=req.media_id)}"
+            )
+            return await _call_flow_api_in_page(
+                page,
+                method="GET",
+                url=api_url,
+                access_token=access_token,
                 browser_headers=browser_headers,
             )
 

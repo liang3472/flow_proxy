@@ -9,6 +9,8 @@ from src.config import settings
 from src.models import (
     ImageGenerateRequest,
     ImageGenerateResponse,
+    MediaGetRequest,
+    MediaGetResponse,
     VideoGenerateRequest,
     VideoGenerateResponse,
     VideoStatusCheckRequest,
@@ -122,6 +124,20 @@ async def check_video_status(req: VideoStatusCheckRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return _flow_api_response(result, VideoStatusCheckResponse)
+
+
+@app.post("/api/v1/media/get", response_model=MediaGetResponse)
+async def get_media(req: MediaGetRequest):
+    """
+    获取媒体详情（GET /v1/media/{mediaId}），成功时 data 内通常含 fifeUrl（签名 CDN 下载地址）。
+    """
+    try:
+        result = await flow_browser.get_media(req)
+    except Exception as exc:
+        logger.exception("Media get failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return _flow_api_response(result, MediaGetResponse)
 
 
 def run():

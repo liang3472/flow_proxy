@@ -138,3 +138,26 @@ class VideoStatusCheckResponse(BaseModel):
     status: int
     data: Any | None = None
     error: str | None = None
+
+
+class MediaGetRequest(BaseModel):
+    project_id: str = Field(..., description="Flow 项目 ID（用于打开项目页取 token）")
+    session_token: str = Field(
+        ...,
+        description="用于注入 Cookie __Secure-next-auth.session-token",
+    )
+    next_auth_session_token: str | None = Field(
+        default=None,
+        description="NextAuth Cookie 值；不传则使用 session_token 注入 Cookie",
+    )
+    media_id: str = Field(
+        ...,
+        description="media UUID，与 status 响应中的 media.name 相同",
+    )
+
+
+class MediaGetResponse(BaseModel):
+    ok: bool
+    status: int
+    data: Any | None = None
+    error: str | None = None
