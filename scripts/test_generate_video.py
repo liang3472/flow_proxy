@@ -32,22 +32,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-_DONE_STATUSES = frozenset(
-    {
-        "MEDIA_GENERATION_STATUS_COMPLETE",
-        "MEDIA_GENERATION_STATUS_COMPLETED",
-        "MEDIA_GENERATION_STATUS_SUCCEEDED",
-        "MEDIA_GENERATION_STATUS_SUCCESSFUL",
-        "MEDIA_GENERATION_STATUS_SUCCESS",
-        "MEDIA_GENERATION_STATUS_READY",
-    }
-)
-_FAILED_STATUSES = frozenset(
-    {
-        "MEDIA_GENERATION_STATUS_FAILED",
-        "MEDIA_GENERATION_STATUS_ERROR",
-        "MEDIA_GENERATION_STATUS_CANCELLED",
-    }
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.media_parse import (  # noqa: E402
+    all_video_media_terminal,
+    any_video_media_failed,
+    parse_video_google_response,
 )
 
 
@@ -111,120 +103,29 @@ def _safe_payload(payload: dict) -> dict:
 
 
 def _extract_media_names(data: Any) -> list[str]:
-    """从 generate/status 响应的 data 中提取 media name。"""
-    if not isinstance(data, dict):
-        return []
-    media = data.get("media")
-    if not isinstance(media, list):
-        return []
-    names: list[str] = []
-    for item in media:
-        if isinstance(item, dict) and item.get("name"):
-            names.append(str(item["name"]))
-    return names
+    return [item.name for item in parse_video_google_response(data)]
 
 
-def _media_generation_status(item: dict) -> str | None:
-    meta = item.get("mediaMetadata")
-    if not isinstance(meta, dict):
-        return None
-    status = meta.get("mediaStatus")
-    if not isinstance(status, dict):
-        return None
-    value = status.get("mediaGenerationStatus")
-    return str(value) if value else None
+def _parsed_from_proxy_body(body: dict, *, project_id: str) -> list:
+    parsed = body.get("parsed")
+    if isinstance(parsed, list) and parsed:
+        return parsed
+    return parse_video_google_response(body.get("data"), fallback_project_id=project_id)
 
 
-def _extract_fife_url(data: Any) -> str | None:
-    """从 GET /v1/media 或嵌套响应中提取 fifeUrl / imageUri。"""
-    if not isinstance(data, dict):
-        return None
-
-    def _from_obj(obj: dict) -> str | None:
-        for key in ("fifeUrl", "imageUri", "videoUri", "signedUri"):
-            val = obj.get(key)
-            if isinstance(val, str) and val.startswith("http"):
-                return val
-        video = obj.get("video")
-        if isinstance(video, dict):
-            gen = video.get("generatedVideo")
-            if isinstance(gen, dict):
-                for key in ("fifeUrl", "videoUri", "signedUri"):
-                    val = gen.get(key)
-                    if isinstance(val, str) and val.startswith("http"):
-                        return val
-        image = obj.get("image")
-        if isinstance(image, dict):
-            gen = image.get("generatedImage")
-            if isinstance(gen, dict):
-                for key in ("fifeUrl", "imageUri"):
-                    val = gen.get(key)
-                    if isinstance(val, str) and val.startswith("http"):
-                        return val
-        return None
-
-    found = _from_obj(data)
-    if found:
-        return found
-    for key in ("media", "image", "video"):
-        nested = data.get(key)
-        if isinstance(nested, dict):
-            found = _from_obj(nested)
-            if found:
-                return found
-    return None
-
-
-def _summarize_media_status(data: Any) -> list[tuple[str, str | None]]:
-    if not isinstance(data, dict):
-        return []
-    media = data.get("media")
-    if not isinstance(media, list):
-        return []
-    out: list[tuple[str, str | None]] = []
-    for item in media:
-        if isinstance(item, dict) and item.get("name"):
-            out.append((str(item["name"]), _media_generation_status(item)))
-    return out
-
-
-def _all_media_terminal(data: Any) -> bool:
-    summary = _summarize_media_status(data)
-    if not summary:
-        return False
-    for _, status in summary:
-        if not status:
-            return False
-        if status not in _DONE_STATUSES and status not in _FAILED_STATUSES:
-            return False
-    return True
-
-
-def _any_media_failed(data: Any) -> bool:
-    return any(
-        s in _FAILED_STATUSES for _, s in _summarize_media_status(data) if s
-    )
-
-
-def _call_media_get(
-    base: str,
-    *,
-    project_id: str,
-    session_token: str,
-    media_id: str,
-    timeout: float,
-) -> tuple[int, dict | str]:
-    payload = {
-        "project_id": project_id,
-        "session_token": session_token,
-        "media_id": media_id,
-    }
-    return _request(
-        "POST",
-        f"{base}/api/v1/media/get",
-        body=payload,
-        timeout=timeout,
-    )
+def _print_parsed_media(parsed: list) -> None:
+    for item in parsed:
+        name = item.name if hasattr(item, "name") else item.get("name")
+        status = (
+            item.generation_status
+            if hasattr(item, "generation_status")
+            else item.get("generation_status")
+        )
+        url = item.video_url if hasattr(item, "video_url") else item.get("video_url")
+        line = f"  {name}: {status or '(无状态)'}"
+        if url:
+            line += f"\n    video_url: {url}"
+        print(line)
 
 
 def _call_status(
@@ -248,35 +149,6 @@ def _call_status(
     )
 
 
-def _fetch_and_print_download_urls(
-    base: str,
-    *,
-    project_id: str,
-    session_token: str,
-    media_names: list[str],
-    request_timeout: float,
-) -> None:
-    for media_id in media_names:
-        print(f"\n--- 获取下载地址: {media_id} ---")
-        status, body = _call_media_get(
-            base,
-            project_id=project_id,
-            session_token=session_token,
-            media_id=media_id,
-            timeout=request_timeout,
-        )
-        print(f"HTTP {status}")
-        print(json.dumps(body, ensure_ascii=False, indent=2))
-        if isinstance(body, dict) and body.get("ok"):
-            url = _extract_fife_url(body.get("data"))
-            if url:
-                print(f"\n下载地址:\n{url}")
-            else:
-                print("\n未在响应中找到 fifeUrl，请检查 data 结构", file=sys.stderr)
-        else:
-            print("\n✗ 获取 media 失败", file=sys.stderr)
-
-
 def _poll_until_done(
     base: str,
     *,
@@ -286,7 +158,6 @@ def _poll_until_done(
     request_timeout: float,
     poll_interval: float,
     poll_timeout: float,
-    fetch_url: bool,
 ) -> int:
     deadline = time.monotonic() + poll_timeout
     attempt = 0
@@ -311,24 +182,26 @@ def _poll_until_done(
             print("\n✗ 状态查询失败", file=sys.stderr)
             return 1
 
-        api_data = body.get("data")
-        for name, gen_status in _summarize_media_status(api_data):
-            print(f"  {name}: {gen_status or '(无状态)'}")
+        parsed = _parsed_from_proxy_body(body, project_id=project_id)
+        _print_parsed_media(parsed)
 
-        if _all_media_terminal(api_data):
-            if _any_media_failed(api_data):
+        if all_video_media_terminal(parsed):
+            if any_video_media_failed(parsed):
                 print("\n✗ 视频生成失败", file=sys.stderr)
                 return 1
+            urls = [
+                (p.video_url if hasattr(p, "video_url") else p.get("video_url"))
+                for p in parsed
+            ]
+            urls = [u for u in urls if u]
             print("\n✓ 视频生成完成")
-            if fetch_url:
-                _fetch_and_print_download_urls(
-                    base,
-                    project_id=project_id,
-                    session_token=session_token,
-                    media_names=media_names,
-                    request_timeout=request_timeout,
-                )
-            return 0
+            if urls:
+                print("下载地址（fifeUrl，与 flow2api 相同来源）:")
+                for url in urls:
+                    print(f"  {url}")
+            else:
+                print("（未解析到 video_url，请检查 data.media）", file=sys.stderr)
+            return 0 if urls else 1
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -342,8 +215,7 @@ def _poll_until_done(
 
 
 def main() -> int:
-    repo_root = Path(__file__).resolve().parents[1]
-    _load_dotenv(repo_root / ".env")
+    _load_dotenv(_REPO_ROOT / ".env")
 
     parser = argparse.ArgumentParser(
         description="测试 /api/v1/videos/generate 与 /api/v1/videos/status",
@@ -363,16 +235,6 @@ def main() -> int:
         "--poll",
         action="store_true",
         help="generate 成功后自动轮询 /api/v1/videos/status 直到完成",
-    )
-    parser.add_argument(
-        "--fetch-url",
-        action="store_true",
-        help="轮询完成后调用 POST /api/v1/media/get 获取 fifeUrl 下载地址",
-    )
-    parser.add_argument(
-        "--get-media-only",
-        action="store_true",
-        help="只调用 POST /api/v1/media/get（需 --media-name）",
     )
     parser.add_argument(
         "--media-name",
@@ -452,19 +314,6 @@ def main() -> int:
         parser.print_help()
         return 2
 
-    if args.get_media_only:
-        if not media_names:
-            print("缺少 --media-name 或 FLOW_VIDEO_MEDIA_NAME", file=sys.stderr)
-            return 2
-        _fetch_and_print_download_urls(
-            base,
-            project_id=args.project_id,
-            session_token=args.session_token,
-            media_names=media_names,
-            request_timeout=args.timeout,
-        )
-        return 0
-
     if args.status_only:
         if not media_names:
             print("缺少 --media-name 或 FLOW_VIDEO_MEDIA_NAME", file=sys.stderr)
@@ -488,7 +337,6 @@ def main() -> int:
                 request_timeout=args.timeout,
                 poll_interval=args.poll_interval,
                 poll_timeout=args.poll_timeout,
-                fetch_url=args.fetch_url,
             )
 
         status, body = _call_status(
@@ -501,6 +349,10 @@ def main() -> int:
         print(f"HTTP {status}")
         print(json.dumps(body, ensure_ascii=False, indent=2))
         if isinstance(body, dict) and body.get("ok"):
+            parsed = _parsed_from_proxy_body(body, project_id=args.project_id)
+            if parsed:
+                print("\n解析结果:")
+                _print_parsed_media(parsed)
             print("\n✓ 状态查询成功")
             return 0
         print("\n✗ 查询失败:", (body or {}).get("error") if isinstance(body, dict) else body, file=sys.stderr)
@@ -558,7 +410,6 @@ def main() -> int:
         request_timeout=args.timeout,
         poll_interval=args.poll_interval,
         poll_timeout=args.poll_timeout,
-        fetch_url=args.fetch_url,
     )
 
 

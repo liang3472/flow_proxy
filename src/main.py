@@ -6,11 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.browser.flow_client import flow_browser
 from src.config import settings
+from src.media_parse import parse_video_google_response
 from src.models import (
     ImageGenerateRequest,
     ImageGenerateResponse,
-    MediaGetRequest,
-    MediaGetResponse,
     VideoGenerateRequest,
     VideoGenerateResponse,
     VideoStatusCheckRequest,
@@ -41,6 +40,36 @@ def _flow_api_response(result: dict, response_cls: type):
         )
 
     return response_cls(ok=True, status=status, data=data)
+
+
+def _video_flow_api_response(
+    result: dict,
+    response_cls: type,
+    *,
+    fallback_project_id: str | None = None,
+):
+    status = int(result.get("status", 500))
+    ok = bool(result.get("ok"))
+    data = result.get("data")
+    parsed = (
+        parse_video_google_response(data, fallback_project_id=fallback_project_id)
+        if ok and data is not None
+        else None
+    )
+
+    if not ok:
+        err_msg = data
+        if isinstance(data, dict):
+            err_msg = data.get("error", {}).get("message") or str(data)
+        return response_cls(
+            ok=False,
+            status=status,
+            data=data,
+            parsed=parsed or None,
+            error=str(err_msg) if err_msg else f"HTTP {status}",
+        )
+
+    return response_cls(ok=True, status=status, data=data, parsed=parsed or None)
 
 
 @asynccontextmanager
@@ -106,7 +135,9 @@ async def generate_video(req: VideoGenerateRequest):
         logger.exception("Video generation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return _flow_api_response(result, VideoGenerateResponse)
+    return _video_flow_api_response(
+        result, VideoGenerateResponse, fallback_project_id=req.project_id
+    )
 
 
 @app.post("/api/v1/videos/status", response_model=VideoStatusCheckResponse)
@@ -115,7 +146,7 @@ async def check_video_status(req: VideoStatusCheckRequest):
     查询异步视频生成状态（batchCheckAsyncVideoGenerationStatus）：
     1. 打开项目页获取 access_token 与浏览器头
     2. 无需 reCAPTCHA
-    3. 透传 Google API 响应
+    3. 透传 Google API 响应，并从 media 解析 generation_status / video_url（fifeUrl）
     """
     try:
         result = await flow_browser.check_video_status(req)
@@ -123,21 +154,9 @@ async def check_video_status(req: VideoStatusCheckRequest):
         logger.exception("Video status check failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return _flow_api_response(result, VideoStatusCheckResponse)
-
-
-@app.post("/api/v1/media/get", response_model=MediaGetResponse)
-async def get_media(req: MediaGetRequest):
-    """
-    获取媒体详情（GET /v1/media/{mediaId}），成功时 data 内通常含 fifeUrl（签名 CDN 下载地址）。
-    """
-    try:
-        result = await flow_browser.get_media(req)
-    except Exception as exc:
-        logger.exception("Media get failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return _flow_api_response(result, MediaGetResponse)
+    return _video_flow_api_response(
+        result, VideoStatusCheckResponse, fallback_project_id=req.project_id
+    )
 
 
 def run():

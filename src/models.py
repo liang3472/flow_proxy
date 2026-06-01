@@ -98,10 +98,30 @@ class VideoGenerateRequest(BaseModel):
     )
 
 
+class ParsedVideoMedia(BaseModel):
+    """从 Google media 对象解析出的字段（与 flow2api 一致）。"""
+
+    name: str
+    project_id: str | None = None
+    generation_status: str | None = Field(
+        default=None,
+        description="如 MEDIA_GENERATION_STATUS_SUCCESSFUL",
+    )
+    video_url: str | None = Field(
+        default=None,
+        description="完成时的 fifeUrl / videoUrl 等签名下载链接",
+    )
+    aspect_ratio: str | None = None
+
+
 class VideoGenerateResponse(BaseModel):
     ok: bool
     status: int
     data: Any | None = None
+    parsed: list[ParsedVideoMedia] | None = Field(
+        default=None,
+        description="从 data.media 解析的状态与 URL（生成阶段通常尚无 video_url）",
+    )
     error: str | None = None
 
 
@@ -137,27 +157,8 @@ class VideoStatusCheckResponse(BaseModel):
     ok: bool
     status: int
     data: Any | None = None
-    error: str | None = None
-
-
-class MediaGetRequest(BaseModel):
-    project_id: str = Field(..., description="Flow 项目 ID（用于打开项目页取 token）")
-    session_token: str = Field(
-        ...,
-        description="用于注入 Cookie __Secure-next-auth.session-token",
-    )
-    next_auth_session_token: str | None = Field(
+    parsed: list[ParsedVideoMedia] | None = Field(
         default=None,
-        description="NextAuth Cookie 值；不传则使用 session_token 注入 Cookie",
+        description="从 data.media 解析；完成时 video_url 为 fifeUrl",
     )
-    media_id: str = Field(
-        ...,
-        description="media UUID，与 status 响应中的 media.name 相同",
-    )
-
-
-class MediaGetResponse(BaseModel):
-    ok: bool
-    status: int
-    data: Any | None = None
     error: str | None = None

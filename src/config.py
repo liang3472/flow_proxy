@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     flow_video_status_api_path: str = (
         "/v1/video:batchCheckAsyncVideoGenerationStatus"
     )
-    flow_media_api_path_template: str = "/v1/media/{media_id}"
 
     @property
     def page_timeout_ms(self) -> int:

@@ -119,23 +119,24 @@ python -m src.main
 | `session_token` | NextAuth Cookie 值 |
 | `media` | 待查列表；每项 `name` 必填，`project_id` 可选 |
 
-可同时查询多个 `media`。响应格式与生成接口相同，根据 `data.media[].mediaMetadata.mediaStatus.mediaGenerationStatus` 判断是否完成（如 `MEDIA_GENERATION_STATUS_SUCCESSFUL`）。
-
-**注意：** 状态接口一般**不包含**带签名的 MP4 下载链接；完成后需再调 `POST /api/v1/media/get` 取 `fifeUrl`（形如 `https://flow-content.google/video/{uuid}?Expires=...`）。
-
-### `POST /api/v1/media/get`
-
-对应 Google `GET /v1/media/{mediaId}`，无需打码。`media_id` 与 status 响应里的 `media.name` 相同。
+可同时查询多个 `media`。响应除原始 `data` 外，增加 `parsed` 数组（与 [flow2api](https://github.com/TheSmallHanCat/flow2api) 相同逻辑从 `media[]` 提取）：
 
 ```json
 {
-  "project_id": "your-project-uuid",
-  "session_token": "ya29.xxx",
-  "media_id": "dff3b58e-8d20-4c75-a82b-f6cdb16116f7"
+  "ok": true,
+  "status": 200,
+  "data": { "media": [ ... ] },
+  "parsed": [
+    {
+      "name": "02c456ef-...",
+      "generation_status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+      "video_url": "https://storage.googleapis.com/..."
+    }
+  ]
 }
 ```
 
-成功时在 `data` 中查找 `fifeUrl`（或 `video.generatedVideo.fifeUrl` 等嵌套字段）即为可下载地址，链接有过期时间（`Expires` 参数）。
+当 `generation_status` 为 `MEDIA_GENERATION_STATUS_SUCCESSFUL` 时，`video_url` 即为 `fifeUrl` 签名 MP4 链接（通常 24h 内有效）。轮询直至该状态出现即可下载，无需额外 API。
 
 ### `GET /health`
 
