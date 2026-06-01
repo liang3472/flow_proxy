@@ -103,3 +103,38 @@ class VideoGenerateResponse(BaseModel):
     status: int
     data: Any | None = None
     error: str | None = None
+
+
+class VideoMediaStatusItem(BaseModel):
+    name: str = Field(
+        ...,
+        description="异步任务 media name，来自 batchAsyncGenerateVideoText 响应",
+    )
+    project_id: str | None = Field(
+        default=None,
+        description="项目 ID；不传则使用请求级 project_id",
+    )
+
+
+class VideoStatusCheckRequest(BaseModel):
+    project_id: str = Field(..., description="Flow 项目 ID（media 项默认项目）")
+    session_token: str = Field(
+        ...,
+        description="用于注入 Cookie __Secure-next-auth.session-token",
+    )
+    next_auth_session_token: str | None = Field(
+        default=None,
+        description="NextAuth Cookie 值；不传则使用 session_token 注入 Cookie",
+    )
+    media: list[VideoMediaStatusItem] = Field(
+        ...,
+        min_length=1,
+        description="待查询的 media 列表",
+    )
+
+
+class VideoStatusCheckResponse(BaseModel):
+    ok: bool
+    status: int
+    data: Any | None = None
+    error: str | None = None

@@ -3,6 +3,8 @@ import logging
 import random
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -19,7 +21,11 @@ from src.browser.session import read_access_token_from_page
 from src.browser.constants import BROWSER_CHANNEL, GOTO_WAIT_UNTIL, PROJECT_GOTO_WAIT_UNTIL
 from src.config import settings
 from src.log_util import format_token_for_log
-from src.models import ImageGenerateRequest, VideoGenerateRequest
+from src.models import (
+    ImageGenerateRequest,
+    VideoGenerateRequest,
+    VideoStatusCheckRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +142,18 @@ def _build_video_request_body(req: VideoGenerateRequest, recaptcha_token: str) -
     if req.use_v2_model_config:
         body["useV2ModelConfig"] = True
     return body
+
+
+def _build_video_status_request_body(req: VideoStatusCheckRequest) -> dict[str, Any]:
+    return {
+        "media": [
+            {
+                "name": item.name,
+                "projectId": item.project_id or req.project_id,
+            }
+            for item in req.media
+        ]
+    }
 
 
 async def _post_flow_api_in_page(
@@ -300,17 +318,24 @@ class FlowBrowserClient:
         await page.add_init_script(WEBDRIVER_HIDE_SCRIPT)
         return page
 
-    async def generate_image(self, req: ImageGenerateRequest) -> dict[str, Any]:
+    @asynccontextmanager
+    async def _flow_project_session(
+        self,
+        project_id: str,
+        cookie_value: str,
+        *,
+        log_label: str,
+    ) -> AsyncIterator[tuple[Page, str, dict[str, str]]]:
         await self._ensure_started()
         page = await self._new_work_tab()
         logger.info(
-            "New work tab for project_id=%s (warmup tab stays open)",
-            req.project_id,
+            "New work tab for %s project_id=%s (warmup tab stays open)",
+            log_label,
+            project_id,
         )
         try:
             assert self._context is not None
-            cookie_value = req.next_auth_session_token or req.session_token
-            project_url = _project_url(req.project_id)
+            project_url = _project_url(project_id)
 
             async with self._session_cookie_lock:
                 await inject_session_cookie(self._context, cookie_value)
@@ -324,7 +349,22 @@ class FlowBrowserClient:
             logger.info("access_token: %s", format_token_for_log(access_token))
 
             browser_headers = await resolve_flow_api_headers(page, self._header_store)
+            yield page, access_token, browser_headers
+        finally:
+            assert self._context is not None
+            try:
+                await clear_labs_google_session(self._context, page)
+            except Exception as exc:
+                logger.warning("Failed to clear labs session after request: %s", exc)
+            if not page.is_closed():
+                await page.close()
+            logger.info("Work tab closed for %s project_id=%s", log_label, project_id)
 
+    async def generate_image(self, req: ImageGenerateRequest) -> dict[str, Any]:
+        cookie_value = req.next_auth_session_token or req.session_token
+        async with self._flow_project_session(
+            req.project_id, cookie_value, log_label="image"
+        ) as (page, access_token, browser_headers):
             await page.add_script_tag(content=INJECT_RECAPTCHA_SCRIPT)
             await _ensure_recaptcha_loaded(page)
 
@@ -346,41 +386,12 @@ class FlowBrowserClient:
                 body=body,
                 browser_headers=browser_headers,
             )
-        finally:
-            assert self._context is not None
-            try:
-                await clear_labs_google_session(self._context, page)
-            except Exception as exc:
-                logger.warning("Failed to clear labs session after request: %s", exc)
-            if not page.is_closed():
-                await page.close()
-            logger.info("Work tab closed for project_id=%s", req.project_id)
 
     async def generate_video(self, req: VideoGenerateRequest) -> dict[str, Any]:
-        await self._ensure_started()
-        page = await self._new_work_tab()
-        logger.info(
-            "New work tab for video project_id=%s (warmup tab stays open)",
-            req.project_id,
-        )
-        try:
-            assert self._context is not None
-            cookie_value = req.next_auth_session_token or req.session_token
-            project_url = _project_url(req.project_id)
-
-            async with self._session_cookie_lock:
-                await inject_session_cookie(self._context, cookie_value)
-                await page.goto(
-                    project_url,
-                    wait_until=PROJECT_GOTO_WAIT_UNTIL,
-                    timeout=settings.page_timeout_ms,
-                )
-
-            access_token = await read_access_token_from_page(page)
-            logger.info("access_token: %s", format_token_for_log(access_token))
-
-            browser_headers = await resolve_flow_api_headers(page, self._header_store)
-
+        cookie_value = req.next_auth_session_token or req.session_token
+        async with self._flow_project_session(
+            req.project_id, cookie_value, log_label="video"
+        ) as (page, access_token, browser_headers):
             await page.add_script_tag(content=INJECT_RECAPTCHA_SCRIPT)
             await _ensure_recaptcha_loaded(page)
 
@@ -400,15 +411,21 @@ class FlowBrowserClient:
                 body=body,
                 browser_headers=browser_headers,
             )
-        finally:
-            assert self._context is not None
-            try:
-                await clear_labs_google_session(self._context, page)
-            except Exception as exc:
-                logger.warning("Failed to clear labs session after request: %s", exc)
-            if not page.is_closed():
-                await page.close()
-            logger.info("Work tab closed for video project_id=%s", req.project_id)
+
+    async def check_video_status(self, req: VideoStatusCheckRequest) -> dict[str, Any]:
+        cookie_value = req.next_auth_session_token or req.session_token
+        async with self._flow_project_session(
+            req.project_id, cookie_value, log_label="video status"
+        ) as (page, access_token, browser_headers):
+            body = _build_video_status_request_body(req)
+            api_url = f"{settings.flow_api_base}{settings.flow_video_status_api_path}"
+            return await _post_flow_api_in_page(
+                page,
+                url=api_url,
+                access_token=access_token,
+                body=body,
+                browser_headers=browser_headers,
+            )
 
 
 flow_browser = FlowBrowserClient()

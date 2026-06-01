@@ -11,6 +11,8 @@ from src.models import (
     ImageGenerateResponse,
     VideoGenerateRequest,
     VideoGenerateResponse,
+    VideoStatusCheckRequest,
+    VideoStatusCheckResponse,
 )
 
 logging.basicConfig(
@@ -18,6 +20,25 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("flow_proxy")
+
+
+def _flow_api_response(result: dict, response_cls: type):
+    status = int(result.get("status", 500))
+    ok = bool(result.get("ok"))
+    data = result.get("data")
+
+    if not ok:
+        err_msg = data
+        if isinstance(data, dict):
+            err_msg = data.get("error", {}).get("message") or str(data)
+        return response_cls(
+            ok=False,
+            status=status,
+            data=data,
+            error=str(err_msg) if err_msg else f"HTTP {status}",
+        )
+
+    return response_cls(ok=True, status=status, data=data)
 
 
 @asynccontextmanager
@@ -65,22 +86,7 @@ async def generate_image(req: ImageGenerateRequest):
         logger.exception("Image generation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    status = int(result.get("status", 500))
-    ok = bool(result.get("ok"))
-    data = result.get("data")
-
-    if not ok:
-        err_msg = data
-        if isinstance(data, dict):
-            err_msg = data.get("error", {}).get("message") or str(data)
-        return ImageGenerateResponse(
-            ok=False,
-            status=status,
-            data=data,
-            error=str(err_msg) if err_msg else f"HTTP {status}",
-        )
-
-    return ImageGenerateResponse(ok=True, status=status, data=data)
+    return _flow_api_response(result, ImageGenerateResponse)
 
 
 @app.post("/api/v1/videos/generate", response_model=VideoGenerateResponse)
@@ -98,22 +104,24 @@ async def generate_video(req: VideoGenerateRequest):
         logger.exception("Video generation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    status = int(result.get("status", 500))
-    ok = bool(result.get("ok"))
-    data = result.get("data")
+    return _flow_api_response(result, VideoGenerateResponse)
 
-    if not ok:
-        err_msg = data
-        if isinstance(data, dict):
-            err_msg = data.get("error", {}).get("message") or str(data)
-        return VideoGenerateResponse(
-            ok=False,
-            status=status,
-            data=data,
-            error=str(err_msg) if err_msg else f"HTTP {status}",
-        )
 
-    return VideoGenerateResponse(ok=True, status=status, data=data)
+@app.post("/api/v1/videos/status", response_model=VideoStatusCheckResponse)
+async def check_video_status(req: VideoStatusCheckRequest):
+    """
+    查询异步视频生成状态（batchCheckAsyncVideoGenerationStatus）：
+    1. 打开项目页获取 access_token 与浏览器头
+    2. 无需 reCAPTCHA
+    3. 透传 Google API 响应
+    """
+    try:
+        result = await flow_browser.check_video_status(req)
+    except Exception as exc:
+        logger.exception("Video status check failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return _flow_api_response(result, VideoStatusCheckResponse)
 
 
 def run():

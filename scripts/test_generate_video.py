@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-测试 Flow Proxy 视频生成接口。
+测试 Flow Proxy 视频生成与状态查询。
 
 用法（先启动服务: python -m src.main）:
 
+  # 仅提交生成
   python scripts/test_generate_video.py ^
     --project-id "你的项目UUID" ^
-    --session-token "ya29.xxx" ^
-    --prompt "cat" ^
-    --aspect-ratio VIDEO_ASPECT_RATIO_LANDSCAPE
+    --session-token "..." ^
+    --prompt "cat"
+
+  # 仅查状态（media name 来自上次 generate 响应）
+  python scripts/test_generate_video.py --status-only --media-name d6f87f88-...
+
+  # 生成后自动轮询直到完成（推荐）
+  python scripts/test_generate_video.py ^
+    --project-id "..." --session-token "..." --prompt "cat" --poll
 
   python scripts/test_generate_video.py --health-only
 """
@@ -19,9 +26,28 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
+
+_DONE_STATUSES = frozenset(
+    {
+        "MEDIA_GENERATION_STATUS_COMPLETE",
+        "MEDIA_GENERATION_STATUS_COMPLETED",
+        "MEDIA_GENERATION_STATUS_SUCCEEDED",
+        "MEDIA_GENERATION_STATUS_SUCCESS",
+        "MEDIA_GENERATION_STATUS_READY",
+    }
+)
+_FAILED_STATUSES = frozenset(
+    {
+        "MEDIA_GENERATION_STATUS_FAILED",
+        "MEDIA_GENERATION_STATUS_ERROR",
+        "MEDIA_GENERATION_STATUS_CANCELLED",
+    }
+)
 
 
 def _load_dotenv(path: Path) -> None:
@@ -76,17 +102,184 @@ def _request(
     return status, parsed
 
 
+def _safe_payload(payload: dict) -> dict:
+    safe = dict(payload)
+    if "session_token" in safe:
+        safe["session_token"] = safe["session_token"][:12] + "..."
+    return safe
+
+
+def _extract_media_names(data: Any) -> list[str]:
+    """从 generate/status 响应的 data 中提取 media name。"""
+    if not isinstance(data, dict):
+        return []
+    media = data.get("media")
+    if not isinstance(media, list):
+        return []
+    names: list[str] = []
+    for item in media:
+        if isinstance(item, dict) and item.get("name"):
+            names.append(str(item["name"]))
+    return names
+
+
+def _media_generation_status(item: dict) -> str | None:
+    meta = item.get("mediaMetadata")
+    if not isinstance(meta, dict):
+        return None
+    status = meta.get("mediaStatus")
+    if not isinstance(status, dict):
+        return None
+    value = status.get("mediaGenerationStatus")
+    return str(value) if value else None
+
+
+def _summarize_media_status(data: Any) -> list[tuple[str, str | None]]:
+    if not isinstance(data, dict):
+        return []
+    media = data.get("media")
+    if not isinstance(media, list):
+        return []
+    out: list[tuple[str, str | None]] = []
+    for item in media:
+        if isinstance(item, dict) and item.get("name"):
+            out.append((str(item["name"]), _media_generation_status(item)))
+    return out
+
+
+def _all_media_terminal(data: Any) -> bool:
+    summary = _summarize_media_status(data)
+    if not summary:
+        return False
+    return all(
+        s in _DONE_STATUSES or s in _FAILED_STATUSES for _, s in summary if s
+    )
+
+
+def _any_media_failed(data: Any) -> bool:
+    return any(
+        s in _FAILED_STATUSES for _, s in _summarize_media_status(data) if s
+    )
+
+
+def _call_status(
+    base: str,
+    *,
+    project_id: str,
+    session_token: str,
+    media_names: list[str],
+    timeout: float,
+) -> tuple[int, dict | str]:
+    payload = {
+        "project_id": project_id,
+        "session_token": session_token,
+        "media": [{"name": name} for name in media_names],
+    }
+    return _request(
+        "POST",
+        f"{base}/api/v1/videos/status",
+        body=payload,
+        timeout=timeout,
+    )
+
+
+def _poll_until_done(
+    base: str,
+    *,
+    project_id: str,
+    session_token: str,
+    media_names: list[str],
+    request_timeout: float,
+    poll_interval: float,
+    poll_timeout: float,
+) -> int:
+    deadline = time.monotonic() + poll_timeout
+    attempt = 0
+
+    print(f"\n开始轮询状态（间隔 {poll_interval}s，最长 {poll_timeout}s）")
+    print(f"media: {', '.join(media_names)}\n")
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        print(f"--- 第 {attempt} 次查询 ---")
+        status, body = _call_status(
+            base,
+            project_id=project_id,
+            session_token=session_token,
+            media_names=media_names,
+            timeout=request_timeout,
+        )
+        print(f"HTTP {status}")
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+
+        if not isinstance(body, dict) or not body.get("ok"):
+            print("\n✗ 状态查询失败", file=sys.stderr)
+            return 1
+
+        api_data = body.get("data")
+        for name, gen_status in _summarize_media_status(api_data):
+            print(f"  {name}: {gen_status or '(无状态)'}")
+
+        if _all_media_terminal(api_data):
+            if _any_media_failed(api_data):
+                print("\n✗ 视频生成失败", file=sys.stderr)
+                return 1
+            print("\n✓ 视频生成完成")
+            return 0
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        sleep_s = min(poll_interval, remaining)
+        print(f"\n未完成，{sleep_s:.0f}s 后重试...\n")
+        time.sleep(sleep_s)
+
+    print("\n✗ 轮询超时", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     _load_dotenv(repo_root / ".env")
 
-    parser = argparse.ArgumentParser(description="测试 /api/v1/videos/generate")
+    parser = argparse.ArgumentParser(
+        description="测试 /api/v1/videos/generate 与 /api/v1/videos/status",
+    )
     parser.add_argument(
         "--base-url",
         default=_base_url(),
         help="服务地址，默认读 HOST/PORT 或 FLOW_PROXY_URL",
     )
     parser.add_argument("--health-only", action="store_true", help="只调用 /health")
+    parser.add_argument(
+        "--status-only",
+        action="store_true",
+        help="只调用 POST /api/v1/videos/status（需 --media-name）",
+    )
+    parser.add_argument(
+        "--poll",
+        action="store_true",
+        help="generate 成功后自动轮询 /api/v1/videos/status 直到完成",
+    )
+    parser.add_argument(
+        "--media-name",
+        action="append",
+        default=[],
+        metavar="UUID",
+        help="media name；status-only 必填；与 --poll 联用时覆盖自动提取",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=float(os.getenv("FLOW_VIDEO_POLL_INTERVAL", "5")),
+        help="轮询间隔秒数（默认 5）",
+    )
+    parser.add_argument(
+        "--poll-timeout",
+        type=float,
+        default=float(os.getenv("FLOW_VIDEO_POLL_TIMEOUT", "600")),
+        help="轮询总超时秒数（默认 600）",
+    )
     parser.add_argument(
         "--project-id",
         default=os.getenv("FLOW_PROJECT_ID", ""),
@@ -118,10 +311,15 @@ def main() -> int:
         "--timeout",
         type=float,
         default=float(os.getenv("FLOW_TEST_TIMEOUT", "300")),
-        help="请求超时秒数（打码+提交可能较久，默认 300）",
+        help="单次 HTTP 请求超时秒数（默认 300）",
     )
     args = parser.parse_args()
     base = args.base_url.rstrip("/")
+
+    media_names = list(args.media_name)
+    env_media = os.getenv("FLOW_VIDEO_MEDIA_NAME", "")
+    if env_media:
+        media_names.extend(n.strip() for n in env_media.split(",") if n.strip())
 
     print(f"Base URL: {base}\n")
 
@@ -141,6 +339,46 @@ def main() -> int:
         parser.print_help()
         return 2
 
+    if args.status_only:
+        if not media_names:
+            print("缺少 --media-name 或 FLOW_VIDEO_MEDIA_NAME", file=sys.stderr)
+            return 2
+        print("POST /api/v1/videos/status")
+        print("Request body:")
+        payload = {
+            "project_id": args.project_id,
+            "session_token": args.session_token,
+            "media": [{"name": name} for name in media_names],
+        }
+        print(json.dumps(_safe_payload(payload), ensure_ascii=False, indent=2))
+        print(f"\n等待响应（timeout={args.timeout}s）...\n")
+
+        if args.poll:
+            return _poll_until_done(
+                base,
+                project_id=args.project_id,
+                session_token=args.session_token,
+                media_names=media_names,
+                request_timeout=args.timeout,
+                poll_interval=args.poll_interval,
+                poll_timeout=args.poll_timeout,
+            )
+
+        status, body = _call_status(
+            base,
+            project_id=args.project_id,
+            session_token=args.session_token,
+            media_names=media_names,
+            timeout=args.timeout,
+        )
+        print(f"HTTP {status}")
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        if isinstance(body, dict) and body.get("ok"):
+            print("\n✓ 状态查询成功")
+            return 0
+        print("\n✗ 查询失败:", (body or {}).get("error") if isinstance(body, dict) else body, file=sys.stderr)
+        return 1
+
     payload = {
         "project_id": args.project_id,
         "session_token": args.session_token,
@@ -150,8 +388,7 @@ def main() -> int:
     }
     print("POST /api/v1/videos/generate")
     print("Request body:")
-    safe = {**payload, "session_token": payload["session_token"][:12] + "..."}
-    print(json.dumps(safe, ensure_ascii=False, indent=2))
+    print(json.dumps(_safe_payload(payload), ensure_ascii=False, indent=2))
     print(f"\n等待响应（timeout={args.timeout}s）...\n")
 
     status, body = _request(
@@ -164,14 +401,37 @@ def main() -> int:
     print(f"HTTP {status}")
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
-    if isinstance(body, dict):
-        if body.get("ok"):
-            print("\n✓ 生成请求成功")
-            return 0
-        print("\n✗ 生成失败:", body.get("error") or "unknown", file=sys.stderr)
+    if not isinstance(body, dict) or not body.get("ok"):
+        print("\n✗ 生成失败:", body.get("error") if isinstance(body, dict) else "unknown", file=sys.stderr)
         return 1
 
-    return 1 if status >= 400 else 0
+    print("\n✓ 生成请求成功")
+
+    if not args.poll:
+        names = _extract_media_names(body.get("data"))
+        if names:
+            print("\n提示: 可用以下命令查询状态:")
+            print(
+                f"  python scripts/test_generate_video.py --status-only "
+                f"--media-name {' --media-name '.join(names)}"
+            )
+            print("  或生成时加 --poll 自动轮询直到完成")
+        return 0
+
+    names = media_names or _extract_media_names(body.get("data"))
+    if not names:
+        print("\n✗ 无法从 generate 响应解析 media name，请手动 --media-name", file=sys.stderr)
+        return 1
+
+    return _poll_until_done(
+        base,
+        project_id=args.project_id,
+        session_token=args.session_token,
+        media_names=names,
+        request_timeout=args.timeout,
+        poll_interval=args.poll_interval,
+        poll_timeout=args.poll_timeout,
+    )
 
 
 if __name__ == "__main__":

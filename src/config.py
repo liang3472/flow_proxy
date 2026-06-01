@@ -28,6 +28,9 @@ class Settings(BaseSettings):
         "/v1/projects/{project_id}/flowMedia:batchGenerateImages"
     )
     flow_video_api_path: str = "/v1/video:batchAsyncGenerateVideoText"
+    flow_video_status_api_path: str = (
+        "/v1/video:batchCheckAsyncVideoGenerationStatus"
+    )
 
     @property
     def page_timeout_ms(self) -> int:
