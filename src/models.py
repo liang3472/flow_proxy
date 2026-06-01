@@ -46,3 +46,60 @@ class ImageGenerateResponse(BaseModel):
     status: int
     data: Any | None = None
     error: str | None = None
+
+
+class VideoGenerateRequest(BaseModel):
+    project_id: str = Field(..., description="Flow 项目 ID")
+    session_token: str = Field(
+        ...,
+        description="用于注入 Cookie __Secure-next-auth.session-token",
+    )
+    next_auth_session_token: str | None = Field(
+        default=None,
+        description="NextAuth Cookie 值；不传则使用 session_token 注入 Cookie",
+    )
+    prompt: str = Field(..., description="视频生成提示词")
+    video_aspect_ratio: str = Field(
+        ...,
+        description="宽高比枚举，如 VIDEO_ASPECT_RATIO_LANDSCAPE",
+        examples=["VIDEO_ASPECT_RATIO_LANDSCAPE"],
+    )
+    video_model_key: str = Field(
+        default="veo_3_1_t2v_lite",
+        description="视频模型 key",
+    )
+    batch_id: str | None = Field(
+        default=None,
+        description="mediaGenerationContext.batchId，不传则自动生成 UUID",
+    )
+    seed: int | None = Field(
+        default=None,
+        description="随机种子，不传则服务端随机生成",
+    )
+    audio_failure_preference: str = Field(
+        default="BLOCK_SILENCED_VIDEOS",
+        description="mediaGenerationContext.audioFailurePreference",
+    )
+    user_paygate_tier: str = Field(
+        default="PAYGATE_TIER_ONE",
+        description="clientContext.userPaygateTier",
+    )
+    use_v2_model_config: bool = Field(
+        default=True,
+        description="是否使用 V2 模型配置",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="requests[].metadata",
+    )
+    captcha_action: str = Field(
+        default="VIDEO_GENERATION",
+        description="reCAPTCHA enterprise action",
+    )
+
+
+class VideoGenerateResponse(BaseModel):
+    ok: bool
+    status: int
+    data: Any | None = None
+    error: str | None = None

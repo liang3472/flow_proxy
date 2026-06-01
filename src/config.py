@@ -22,7 +22,12 @@ class Settings(BaseSettings):
     )
     recaptcha_site_key: str = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
     recaptcha_action_image: str = "IMAGE_GENERATION"
+    recaptcha_action_video: str = "VIDEO_GENERATION"
     flow_api_base: str = "https://aisandbox-pa.googleapis.com"
+    flow_image_api_path_template: str = (
+        "/v1/projects/{project_id}/flowMedia:batchGenerateImages"
+    )
+    flow_video_api_path: str = "/v1/video:batchAsyncGenerateVideoText"
 
     @property
     def page_timeout_ms(self) -> int:

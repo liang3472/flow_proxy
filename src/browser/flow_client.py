@@ -19,7 +19,7 @@ from src.browser.session import read_access_token_from_page
 from src.browser.constants import BROWSER_CHANNEL, GOTO_WAIT_UNTIL, PROJECT_GOTO_WAIT_UNTIL
 from src.config import settings
 from src.log_util import format_token_for_log
-from src.models import ImageGenerateRequest
+from src.models import ImageGenerateRequest, VideoGenerateRequest
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,87 @@ def _build_request_body(req: ImageGenerateRequest, recaptcha_token: str) -> dict
         "useNewMedia": True,
         "requests": [request_item],
     }
+
+
+def _build_video_request_body(req: VideoGenerateRequest, recaptcha_token: str) -> dict[str, Any]:
+    session_id = f";{int(time.time() * 1000)}"
+    batch_id = req.batch_id or str(uuid.uuid4())
+    seed = req.seed if req.seed is not None else random.randint(1, 999_999)
+
+    client_context = {
+        "recaptchaContext": {
+            "token": recaptcha_token,
+            "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+        },
+        "projectId": req.project_id,
+        "tool": "PINHOLE",
+        "userPaygateTier": req.user_paygate_tier,
+        "sessionId": session_id,
+    }
+
+    request_item = {
+        "aspectRatio": req.video_aspect_ratio,
+        "textInput": {
+            "structuredPrompt": {
+                "parts": [{"text": req.prompt}],
+            },
+        },
+        "videoModelKey": req.video_model_key,
+        "seed": seed,
+        "metadata": req.metadata,
+    }
+
+    body: dict[str, Any] = {
+        "clientContext": client_context,
+        "mediaGenerationContext": {
+            "batchId": batch_id,
+            "audioFailurePreference": req.audio_failure_preference,
+        },
+        "requests": [request_item],
+    }
+    if req.use_v2_model_config:
+        body["useV2ModelConfig"] = True
+    return body
+
+
+async def _post_flow_api_in_page(
+    page: Page,
+    *,
+    url: str,
+    access_token: str,
+    body: dict[str, Any],
+    browser_headers: dict[str, str],
+) -> dict[str, Any]:
+    return await page.evaluate(
+        """
+        async ({ url, token, body, browserHeaders }) => {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'text/plain;charset=UTF-8',
+              Referer: 'https://labs.google/',
+              ...browserHeaders,
+            },
+            body: JSON.stringify(body),
+          });
+          const text = await res.text();
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = text;
+          }
+          return { status: res.status, ok: res.ok, data };
+        }
+        """,
+        {
+            "url": url,
+            "token": access_token,
+            "body": body,
+            "browserHeaders": browser_headers,
+        },
+    )
 
 
 async def _ensure_recaptcha_loaded(page: Page) -> None:
@@ -254,41 +335,17 @@ class FlowBrowserClient:
 
             body = _build_request_body(req, recaptcha_token)
             api_url = (
-                f"{settings.flow_api_base}/v1/projects/"
-                f"{req.project_id}/flowMedia:batchGenerateImages"
+                f"{settings.flow_api_base}"
+                f"{settings.flow_image_api_path_template.format(project_id=req.project_id)}"
             )
 
-            result = await page.evaluate(
-                """
-                async ({ url, token, body, browserHeaders }) => {
-                  const res = await fetch(url, {
-                    method: 'POST',
-                    headers: {
-                      authorization: `Bearer ${token}`,
-                      'content-type': 'text/plain;charset=UTF-8',
-                      Referer: 'https://labs.google/',
-                      ...browserHeaders,
-                    },
-                    body: JSON.stringify(body),
-                  });
-                  const text = await res.text();
-                  let data;
-                  try {
-                    data = JSON.parse(text);
-                  } catch {
-                    data = text;
-                  }
-                  return { status: res.status, ok: res.ok, data };
-                }
-                """,
-                {
-                    "url": api_url,
-                    "token": access_token,
-                    "body": body,
-                    "browserHeaders": browser_headers,
-                },
+            return await _post_flow_api_in_page(
+                page,
+                url=api_url,
+                access_token=access_token,
+                body=body,
+                browser_headers=browser_headers,
             )
-            return result
         finally:
             assert self._context is not None
             try:
@@ -298,6 +355,60 @@ class FlowBrowserClient:
             if not page.is_closed():
                 await page.close()
             logger.info("Work tab closed for project_id=%s", req.project_id)
+
+    async def generate_video(self, req: VideoGenerateRequest) -> dict[str, Any]:
+        await self._ensure_started()
+        page = await self._new_work_tab()
+        logger.info(
+            "New work tab for video project_id=%s (warmup tab stays open)",
+            req.project_id,
+        )
+        try:
+            assert self._context is not None
+            cookie_value = req.next_auth_session_token or req.session_token
+            project_url = _project_url(req.project_id)
+
+            async with self._session_cookie_lock:
+                await inject_session_cookie(self._context, cookie_value)
+                await page.goto(
+                    project_url,
+                    wait_until=PROJECT_GOTO_WAIT_UNTIL,
+                    timeout=settings.page_timeout_ms,
+                )
+
+            access_token = await read_access_token_from_page(page)
+            logger.info("access_token: %s", format_token_for_log(access_token))
+
+            browser_headers = await resolve_flow_api_headers(page, self._header_store)
+
+            await page.add_script_tag(content=INJECT_RECAPTCHA_SCRIPT)
+            await _ensure_recaptcha_loaded(page)
+
+            captcha_action = req.captcha_action or settings.recaptcha_action_video
+            recaptcha_token = await solve_recaptcha_on_page(
+                page,
+                action=captcha_action,
+            )
+
+            body = _build_video_request_body(req, recaptcha_token)
+            api_url = f"{settings.flow_api_base}{settings.flow_video_api_path}"
+
+            return await _post_flow_api_in_page(
+                page,
+                url=api_url,
+                access_token=access_token,
+                body=body,
+                browser_headers=browser_headers,
+            )
+        finally:
+            assert self._context is not None
+            try:
+                await clear_labs_google_session(self._context, page)
+            except Exception as exc:
+                logger.warning("Failed to clear labs session after request: %s", exc)
+            if not page.is_closed():
+                await page.close()
+            logger.info("Work tab closed for video project_id=%s", req.project_id)
 
 
 flow_browser = FlowBrowserClient()

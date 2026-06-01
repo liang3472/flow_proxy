@@ -1,6 +1,6 @@
 # Flow Proxy
 
-Google Flow 图片生成请求代理服务。收到 API 请求后，用 Playwright 打开对应项目页、在页面内完成 reCAPTCHA 打码，再在同一浏览器上下文中调用 `batchGenerateImages`，并把 Google 返回结果透传给调用方。
+Google Flow 图片/视频生成请求代理服务。收到 API 请求后，用 Playwright 打开对应项目页、在页面内完成 reCAPTCHA 打码，再在同一浏览器上下文中调用 Google Flow API（图片 `batchGenerateImages`、视频 `batchAsyncGenerateVideoText`），并把返回结果透传给调用方。
 
 ## 环境要求
 
@@ -66,6 +66,37 @@ python -m src.main
 
 失败时 `ok` 为 `false`，`error` 为错误说明，`data` 为 Google 原始错误体（若有）。
 
+### `POST /api/v1/videos/generate`
+
+**请求体示例：**
+
+```json
+{
+  "project_id": "your-project-uuid",
+  "session_token": "ya29.xxx",
+  "prompt": "cat",
+  "video_aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+  "video_model_key": "veo_3_1_t2v_lite"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `project_id` | Flow 项目 ID |
+| `session_token` | NextAuth Cookie 值 |
+| `next_auth_session_token` | 可选，仅 Cookie |
+| `prompt` | 提示词 |
+| `video_aspect_ratio` | 如 `VIDEO_ASPECT_RATIO_LANDSCAPE` |
+| `video_model_key` | 默认 `veo_3_1_t2v_lite` |
+| `batch_id` | 可选 |
+| `seed` | 可选 |
+| `audio_failure_preference` | 默认 `BLOCK_SILENCED_VIDEOS` |
+| `user_paygate_tier` | 默认 `PAYGATE_TIER_ONE` |
+| `use_v2_model_config` | 默认 `true` |
+| `metadata` | 可选，请求项 metadata |
+
+响应格式与图片接口相同。视频为异步任务，成功时 `data` 内通常包含任务/批次信息，需按 Google 返回字段轮询或在前端查看。
+
 ### `GET /health`
 
 健康检查。
@@ -75,7 +106,7 @@ python -m src.main
 1. **服务启动时**：打开 `BROWSER_WARMUP_URL`（默认 [https://labs.google/](https://labs.google/)）作为预热标签页，**保持不关闭**
 2. **收到生成请求时**：注入 Cookie → 新开标签页打开项目页
 3. 从 `__NEXT_DATA__.props.pageProps.session.access_token` 读取 API Bearer
-4. 打码后在页面内 `fetch` `batchGenerateImages`（使用该 access_token）
+4. 打码后在页面内 `fetch` 对应 API（图片 `batchGenerateImages`，视频 `batchAsyncGenerateVideoText`）
 5. 返回 API 响应后**仅关闭该工作标签页**，预热页与浏览器继续保留
 
 ## 配置
@@ -93,7 +124,13 @@ python -m src.main
 curl -X POST http://127.0.0.1:8765/api/v1/images/generate ^
   -H "Content-Type: application/json" ^
   -d "{\"project_id\":\"xxx\",\"session_token\":\"ya29...\",\"prompt\":\"hello\",\"image_aspect_ratio\":\"IMAGE_ASPECT_RATIO_LANDSCAPE\"}"
+
+curl -X POST http://127.0.0.1:8765/api/v1/videos/generate ^
+  -H "Content-Type: application/json" ^
+  -d "{\"project_id\":\"xxx\",\"session_token\":\"ya29...\",\"prompt\":\"cat\",\"video_aspect_ratio\":\"VIDEO_ASPECT_RATIO_LANDSCAPE\"}"
 ```
+
+测试脚本：`scripts/test_generate_image.py`、`scripts/test_generate_video.py`。
 
 ## 注意
 
