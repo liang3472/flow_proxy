@@ -39,6 +39,7 @@ if str(_REPO_ROOT) not in sys.path:
 from src.media_parse import (  # noqa: E402
     all_video_media_terminal,
     any_video_media_failed,
+    normalize_parsed_video_media,
     parse_video_google_response,
 )
 
@@ -109,22 +110,15 @@ def _extract_media_names(data: Any) -> list[str]:
 def _parsed_from_proxy_body(body: dict, *, project_id: str) -> list:
     parsed = body.get("parsed")
     if isinstance(parsed, list) and parsed:
-        return parsed
+        return normalize_parsed_video_media(parsed)
     return parse_video_google_response(body.get("data"), fallback_project_id=project_id)
 
 
 def _print_parsed_media(parsed: list) -> None:
-    for item in parsed:
-        name = item.name if hasattr(item, "name") else item.get("name")
-        status = (
-            item.generation_status
-            if hasattr(item, "generation_status")
-            else item.get("generation_status")
-        )
-        url = item.video_url if hasattr(item, "video_url") else item.get("video_url")
-        line = f"  {name}: {status or '(无状态)'}"
-        if url:
-            line += f"\n    video_url: {url}"
+    for item in normalize_parsed_video_media(parsed):
+        line = f"  {item.name}: {item.generation_status or '(无状态)'}"
+        if item.video_url:
+            line += f"\n    video_url: {item.video_url}"
         print(line)
 
 
@@ -189,10 +183,7 @@ def _poll_until_done(
             if any_video_media_failed(parsed):
                 print("\n✗ 视频生成失败", file=sys.stderr)
                 return 1
-            urls = [
-                (p.video_url if hasattr(p, "video_url") else p.get("video_url"))
-                for p in parsed
-            ]
+            urls = [p.video_url for p in normalize_parsed_video_media(parsed)]
             urls = [u for u in urls if u]
             print("\n✓ 视频生成完成")
             if urls:

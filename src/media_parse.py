@@ -149,11 +149,34 @@ def is_video_generation_terminal(status: str | None) -> bool:
     return is_video_generation_done(status) or is_video_generation_failed(status)
 
 
-def all_video_media_terminal(parsed: list[ParsedVideoMedia]) -> bool:
-    if not parsed:
+def normalize_parsed_video_media(items: Any) -> list[ParsedVideoMedia]:
+    """将 API JSON 的 parsed 列表或混合输入统一为 ParsedVideoMedia。"""
+    if not isinstance(items, list):
+        return []
+    out: list[ParsedVideoMedia] = []
+    for item in items:
+        if isinstance(item, ParsedVideoMedia):
+            out.append(item)
+        elif isinstance(item, dict) and item.get("name"):
+            out.append(
+                ParsedVideoMedia(
+                    name=str(item["name"]),
+                    project_id=item.get("project_id"),
+                    generation_status=item.get("generation_status"),
+                    video_url=item.get("video_url"),
+                    aspect_ratio=item.get("aspect_ratio"),
+                )
+            )
+    return out
+
+
+def all_video_media_terminal(parsed: list[ParsedVideoMedia] | Any) -> bool:
+    rows = normalize_parsed_video_media(parsed)
+    if not rows:
         return False
-    return all(is_video_generation_terminal(item.generation_status) for item in parsed)
+    return all(is_video_generation_terminal(item.generation_status) for item in rows)
 
 
-def any_video_media_failed(parsed: list[ParsedVideoMedia]) -> bool:
-    return any(is_video_generation_failed(item.generation_status) for item in parsed)
+def any_video_media_failed(parsed: list[ParsedVideoMedia] | Any) -> bool:
+    rows = normalize_parsed_video_media(parsed)
+    return any(is_video_generation_failed(item.generation_status) for item in rows)
