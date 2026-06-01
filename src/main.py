@@ -6,10 +6,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.browser.flow_client import flow_browser
 from src.config import settings
-from src.media_parse import parse_video_google_response
 from src.models import (
     ImageGenerateRequest,
     ImageGenerateResponse,
+    MediaUrlRequest,
+    MediaUrlResponse,
     VideoGenerateRequest,
     VideoGenerateResponse,
     VideoStatusCheckRequest,
@@ -42,36 +43,6 @@ def _flow_api_response(result: dict, response_cls: type):
     return response_cls(ok=True, status=status, data=data)
 
 
-def _video_flow_api_response(
-    result: dict,
-    response_cls: type,
-    *,
-    fallback_project_id: str | None = None,
-):
-    status = int(result.get("status", 500))
-    ok = bool(result.get("ok"))
-    data = result.get("data")
-    parsed = (
-        parse_video_google_response(data, fallback_project_id=fallback_project_id)
-        if ok and data is not None
-        else None
-    )
-
-    if not ok:
-        err_msg = data
-        if isinstance(data, dict):
-            err_msg = data.get("error", {}).get("message") or str(data)
-        return response_cls(
-            ok=False,
-            status=status,
-            data=data,
-            parsed=parsed or None,
-            error=str(err_msg) if err_msg else f"HTTP {status}",
-        )
-
-    return response_cls(ok=True, status=status, data=data, parsed=parsed or None)
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("Starting Playwright browser...")
@@ -83,7 +54,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Flow Proxy",
-    description="Google Flow 图片/视频生成代理：浏览器打码 + 页面内转发 API",
+    description="Google Flow 图片/视频生成与媒体 URL 代理：浏览器会话 + 页面内转发 API",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -135,9 +106,7 @@ async def generate_video(req: VideoGenerateRequest):
         logger.exception("Video generation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return _video_flow_api_response(
-        result, VideoGenerateResponse, fallback_project_id=req.project_id
-    )
+    return _flow_api_response(result, VideoGenerateResponse)
 
 
 @app.post("/api/v1/videos/status", response_model=VideoStatusCheckResponse)
@@ -146,7 +115,7 @@ async def check_video_status(req: VideoStatusCheckRequest):
     查询异步视频生成状态（batchCheckAsyncVideoGenerationStatus）：
     1. 打开项目页获取 access_token 与浏览器头
     2. 无需 reCAPTCHA
-    3. 透传 Google API 响应，并从 media 解析 generation_status / video_url（fifeUrl）
+    3. 透传 Google API 响应
     """
     try:
         result = await flow_browser.check_video_status(req)
@@ -154,9 +123,24 @@ async def check_video_status(req: VideoStatusCheckRequest):
         logger.exception("Video status check failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return _video_flow_api_response(
-        result, VideoStatusCheckResponse, fallback_project_id=req.project_id
-    )
+    return _flow_api_response(result, VideoStatusCheckResponse)
+
+
+@app.post("/api/v1/media/url", response_model=MediaUrlResponse)
+async def get_media_url(req: MediaUrlRequest):
+    """
+    解析 media 下载/播放地址（labs.google media.getMediaUrlRedirect）：
+    1. 打开项目页并携带 Cookie
+    2. 调用 tRPC 重定向接口
+    3. 返回 data.url（可选跟随重定向）
+    """
+    try:
+        result = await flow_browser.get_media_url(req)
+    except Exception as exc:
+        logger.exception("Media URL resolve failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return _flow_api_response(result, MediaUrlResponse)
 
 
 def run():

@@ -119,24 +119,41 @@ python -m src.main
 | `session_token` | NextAuth Cookie 值 |
 | `media` | 待查列表；每项 `name` 必填，`project_id` 可选 |
 
-可同时查询多个 `media`。响应除原始 `data` 外，增加 `parsed` 数组（与 [flow2api](https://github.com/TheSmallHanCat/flow2api) 相同逻辑从 `media[]` 提取）：
+可同时查询多个 `media`。响应格式与生成接口相同，根据 `data` 内状态字段判断是否完成。
+
+### `POST /api/v1/media/url`
+
+视频生成完成并状态就绪后，解析 **下载/播放直链**（对应 `media.getMediaUrlRedirect`）。**无需打码**，使用 labs.google Cookie 会话。
+
+**请求体示例：**
 
 ```json
 {
-  "ok": true,
-  "status": 200,
-  "data": { "media": [ ... ] },
-  "parsed": [
-    {
-      "name": "02c456ef-...",
-      "generation_status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
-      "video_url": "https://storage.googleapis.com/..."
-    }
-  ]
+  "project_id": "your-project-uuid",
+  "session_token": "ya29.xxx",
+  "name": "dff3b58e-8d20-4c75-a82b-f6cdb16116f7",
+  "follow_redirect": true
 }
 ```
 
-当 `generation_status` 为 `MEDIA_GENERATION_STATUS_SUCCESSFUL` 时，`video_url` 即为 `fifeUrl` 签名 MP4 链接（通常 24h 内有效）。轮询直至该状态出现即可下载，无需额外 API。
+| 字段 | 说明 |
+|------|------|
+| `project_id` | Flow 项目 ID |
+| `session_token` | NextAuth Cookie 值 |
+| `name` | media UUID（与 status 查询中的 `media.name` 相同） |
+| `follow_redirect` | 默认 `true`，跟随重定向得到最终 URL；`false` 时仅取 HTTP `Location` |
+
+**成功时 `data` 示例：**
+
+```json
+{
+  "url": "https://...",
+  "redirect": true,
+  "raw": { }
+}
+```
+
+`raw` 为 tRPC 原始 JSON（若有）；`url` 为可直接下载或拉流的地址（通常有时效）。
 
 ### `GET /health`
 
@@ -147,7 +164,7 @@ python -m src.main
 1. **服务启动时**：打开 `BROWSER_WARMUP_URL`（默认 [https://labs.google/](https://labs.google/)）作为预热标签页，**保持不关闭**
 2. **收到生成请求时**：注入 Cookie → 新开标签页打开项目页
 3. 从 `__NEXT_DATA__.props.pageProps.session.access_token` 读取 API Bearer
-4. 打码后在页面内 `fetch` 对应 API（图片 `batchGenerateImages`，视频 `batchAsyncGenerateVideoText`）；状态查询 `batchCheckAsyncVideoGenerationStatus` 仅需 token，不打码
+4. 打码后在页面内 `fetch` 对应 API（图片 `batchGenerateImages`，视频 `batchAsyncGenerateVideoText`）；状态查询与媒体 URL 解析无需打码
 5. 返回 API 响应后**仅关闭该工作标签页**，预热页与浏览器继续保留
 
 ## 配置
@@ -173,15 +190,13 @@ curl -X POST http://127.0.0.1:8765/api/v1/videos/generate ^
 curl -X POST http://127.0.0.1:8765/api/v1/videos/status ^
   -H "Content-Type: application/json" ^
   -d "{\"project_id\":\"xxx\",\"session_token\":\"ya29...\",\"media\":[{\"name\":\"d6f87f88-ca67-415d-aaa8-a0368a155925\"}]}"
+
+curl -X POST http://127.0.0.1:8765/api/v1/media/url ^
+  -H "Content-Type: application/json" ^
+  -d "{\"project_id\":\"xxx\",\"session_token\":\"ya29...\",\"name\":\"dff3b58e-8d20-4c75-a82b-f6cdb16116f7\"}"
 ```
 
-测试脚本：`scripts/test_generate_image.py`、`scripts/test_generate_video.py`。
-
-视频脚本三种模式：
-
-- 默认：仅 `POST /api/v1/videos/generate`，成功后会打印建议的状态查询命令
-- `--status-only --media-name <uuid>`：单次或配合 `--poll` 轮询 `POST /api/v1/videos/status`
-- `--poll`：生成成功后自动提取 `data.media[].name` 并轮询直到完成（可加 `--poll-interval`、`--poll-timeout`）
+测试脚本：`scripts/test_generate_image.py`、`scripts/test_generate_video.py`（`--status-only` / `--url-only` + `--media-name`）。
 
 ## 注意
 

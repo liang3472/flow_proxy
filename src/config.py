@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     flow_video_status_api_path: str = (
         "/v1/video:batchCheckAsyncVideoGenerationStatus"
     )
+    flow_labs_origin: str = "https://labs.google"
+    flow_media_url_redirect_template: str = (
+        "/fx/api/trpc/media.getMediaUrlRedirect?name={name}"
+    )
 
     @property
     def page_timeout_ms(self) -> int:

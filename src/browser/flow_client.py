@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import quote
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -23,6 +24,7 @@ from src.config import settings
 from src.log_util import format_token_for_log
 from src.models import (
     ImageGenerateRequest,
+    MediaUrlRequest,
     VideoGenerateRequest,
     VideoStatusCheckRequest,
 )
@@ -67,6 +69,13 @@ WEBDRIVER_HIDE_SCRIPT = (
 
 def _project_url(project_id: str) -> str:
     return settings.flow_project_url_template.format(project_id=project_id)
+
+
+def _media_url_redirect_url(media_name: str) -> str:
+    path = settings.flow_media_url_redirect_template.format(
+        name=quote(media_name, safe="")
+    )
+    return f"{settings.flow_labs_origin.rstrip('/')}{path}"
 
 
 def _build_request_body(req: ImageGenerateRequest, recaptcha_token: str) -> dict[str, Any]:
@@ -154,6 +163,84 @@ def _build_video_status_request_body(req: VideoStatusCheckRequest) -> dict[str, 
             for item in req.media
         ]
     }
+
+
+async def _get_media_url_redirect_in_page(
+    page: Page,
+    *,
+    url: str,
+    follow_redirect: bool,
+) -> dict[str, Any]:
+    return await page.evaluate(
+        """
+        async ({ url, followRedirect }) => {
+          const findHttpUrl = (payload) => {
+            const stack = [payload];
+            while (stack.length) {
+              const cur = stack.pop();
+              if (typeof cur === 'string' && /^https?:\\/\\//i.test(cur)) {
+                return cur;
+              }
+              if (cur && typeof cur === 'object') {
+                for (const v of Object.values(cur)) stack.push(v);
+              }
+            }
+            return null;
+          };
+
+          const res = await fetch(url, {
+            method: 'GET',
+            credentials: 'include',
+            redirect: followRedirect ? 'follow' : 'manual',
+          });
+
+          if (!followRedirect && res.status >= 300 && res.status < 400) {
+            const location = res.headers.get('location');
+            return {
+              status: res.status,
+              ok: Boolean(location),
+              data: {
+                url: location,
+                redirect: true,
+              },
+            };
+          }
+
+          const contentType = res.headers.get('content-type') || '';
+          let raw = null;
+          if (contentType.includes('application/json')) {
+            try {
+              raw = await res.json();
+            } catch {
+              raw = null;
+            }
+          } else {
+            const text = await res.text();
+            if (text) {
+              try {
+                raw = JSON.parse(text);
+              } catch {
+                raw = text;
+              }
+            }
+          }
+
+          const parsedUrl = raw ? findHttpUrl(raw) : null;
+          const finalUrl = parsedUrl || (res.url !== url ? res.url : null);
+
+          return {
+            status: res.status,
+            ok: res.ok && Boolean(finalUrl),
+            data: {
+              url: finalUrl,
+              redirect: Boolean(finalUrl && finalUrl !== url),
+              raw,
+            },
+          };
+        }
+        """,
+        {"url": url, "followRedirect": follow_redirect},
+    )
 
 
 async def _post_flow_api_in_page(
@@ -425,6 +512,19 @@ class FlowBrowserClient:
                 access_token=access_token,
                 body=body,
                 browser_headers=browser_headers,
+            )
+
+    async def get_media_url(self, req: MediaUrlRequest) -> dict[str, Any]:
+        cookie_value = req.next_auth_session_token or req.session_token
+        async with self._flow_project_session(
+            req.project_id, cookie_value, log_label="media url"
+        ) as (page, _access_token, _browser_headers):
+            api_url = _media_url_redirect_url(req.name)
+            logger.info("Fetching media URL redirect for name=%s", req.name)
+            return await _get_media_url_redirect_in_page(
+                page,
+                url=api_url,
+                follow_redirect=req.follow_redirect,
             )
 
 
