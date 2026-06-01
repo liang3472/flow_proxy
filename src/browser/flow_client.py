@@ -182,17 +182,29 @@ def _find_http_url_in_payload(payload: Any) -> str | None:
     return None
 
 
+def _response_looks_textual(content_type: str) -> bool:
+    ct = (content_type or "").lower()
+    return "json" in ct or ct.startswith("text/")
+
+
 async def _parse_api_response_body(response: Any) -> Any:
+    content_type = response.headers.get("content-type", "")
+    if not _response_looks_textual(content_type):
+        return None
+
+    body = await response.body()
+    if not body:
+        return None
+
     try:
-        return await response.json()
-    except Exception:
-        text = await response.text()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            return text
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 async def _get_media_url_redirect_via_context(
@@ -223,6 +235,7 @@ async def _get_media_url_redirect_via_context(
         }
 
     status = response.status
+    response_url = str(response.url)
 
     if not follow_redirect and 300 <= status < 400:
         location = response.headers.get("location")
@@ -234,16 +247,20 @@ async def _get_media_url_redirect_via_context(
 
     raw = await _parse_api_response_body(response)
     parsed_url = _find_http_url_in_payload(raw)
-    response_url = str(response.url)
-    final_url = parsed_url or (response_url if response_url != url else None)
+
+    # 跟随重定向后常为视频二进制，最终可下载地址即 response.url
+    final_url = parsed_url
+    if not final_url and response_url != url:
+        final_url = response_url
 
     return {
         "status": status,
-        "ok": response.ok and bool(final_url),
+        "ok": bool(final_url) and (response.ok or 300 <= status < 400),
         "data": {
             "url": final_url,
             "redirect": bool(final_url and final_url != url),
             "raw": raw,
+            "content_type": response.headers.get("content-type"),
         },
     }
 
